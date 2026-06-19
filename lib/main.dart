@@ -6,6 +6,7 @@ import 'features/auth/presentation/bloc/auth_bloc.dart';
 import 'features/auth/presentation/pages/login_page.dart';
 import 'features/auth/steps/presentation/widgets/step_counter_widget.dart';
 import 'features/tracking/presentation/widgets/route_map_widget.dart';
+import 'features/activity/presentation/widgets/activity_monitor_widget.dart';
 
 void main() {
   WidgetsFlutterBinding.ensureInitialized();
@@ -54,7 +55,7 @@ class _AuthWrapperState extends State<AuthWrapper> {
   @override
   Widget build(BuildContext context) {
     if (_isAuthenticated) {
-      return const HomePage();
+      return const ActivityMonitorWidget(child: HomePage());
     }
     return LoginPage(onAuthSuccess: _onAuthSuccess);
   }

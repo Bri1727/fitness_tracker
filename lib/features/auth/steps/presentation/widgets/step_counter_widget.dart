@@ -1,13 +1,12 @@
 import 'package:flutter/material.dart';
 import 'dart:async';
+import '../../../../../core/services/voice_announcer.dart';
 import '../../../data/datasources/acelerometer_datasource.dart';
 import '../../../domain/entities/step_data.dart';
+import '../../../../activity/presentation/widgets/fall_detection_dialog.dart';
 
-/// Widget que muestra el contador de pasos
-///
-/// EXPLICACIÓN DIDÁCTICA:
-/// - Usa StreamSubscription para escuchar el EventChannel
-/// - Actualiza UI cada vez que llegan nuevos datos
+/// Widget que muestra el contador de pasos y anuncia cambios
+/// de actividad por voz mediante VoiceAnnouncer.
 class StepCounterWidget extends StatefulWidget {
   const StepCounterWidget({super.key});
 
@@ -17,10 +16,18 @@ class StepCounterWidget extends StatefulWidget {
 
 class _StepCounterWidgetState extends State<StepCounterWidget> {
   final AccelerometerDataSource _dataSource = AccelerometerDataSourceImpl();
+  final VoiceAnnouncer _voiceAnnouncer = VoiceAnnouncer();
 
   StreamSubscription<StepData>? _subscription;
   StepData? _currentData;
   bool _isTracking = false;
+  bool _isFallDialogShowing = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) => _startTracking());
+  }
 
   @override
   void dispose() {
@@ -37,7 +44,6 @@ class _StepCounterWidgetState extends State<StepCounterWidget> {
   }
 
   void _startTracking() async {
-    // Solicitar permisos
     final hasPermission = await _dataSource.requestPermissions();
     if (!hasPermission) {
       if (mounted) {
@@ -51,17 +57,23 @@ class _StepCounterWidgetState extends State<StepCounterWidget> {
       return;
     }
 
+    await _voiceAnnouncer.init();
     await _dataSource.startCounting();
 
-    // SUSCRIBIRSE AL STREAM
     _subscription = _dataSource.stepStream.listen(
       (data) {
         setState(() {
           _currentData = data;
         });
+
+        if (data.activityType == ActivityType.falling) {
+          _handleFallDetection();
+        } else if (!_isFallDialogShowing) {
+          _voiceAnnouncer.announceActivityChange(data.activityType);
+        }
       },
       onError: (error) {
-        print('Error en stream: $error');
+        debugPrint('[StepCounter] Stream error: $error');
       },
     );
 
@@ -77,6 +89,21 @@ class _StepCounterWidgetState extends State<StepCounterWidget> {
     setState(() {
       _isTracking = false;
     });
+  }
+
+  void _handleFallDetection() {
+    if (_isFallDialogShowing || !mounted) return;
+
+    _isFallDialogShowing = true;
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => FallDetectionDialog(
+        onDismiss: () {
+          _isFallDialogShowing = false;
+        },
+      ),
+    );
   }
 
   @override

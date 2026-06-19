@@ -5,6 +5,7 @@ enum ActivityType {
   stationary,  // Quieto
   walking,     // Caminando
   running,     // Corriendo
+  falling,     // Caída detectada
 }
 
 /// Datos del acelerómetro

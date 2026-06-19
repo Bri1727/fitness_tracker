@@ -1,0 +1,324 @@
+========================================
+  CAMBIOS IMPLEMENTADOS - FITNESS TRACKER
+========================================
+
+1. DEPENDENCIAS AGREGADAS (pubspec.yaml)
+----------------------------------------
+- activity_recognition_flutter: ^5.0.0
+  -> Detecta si el usuario camina, corre o está quieto
+
+- sensors_plus: ^6.0.0
+  -> Acelerómetro para detectar caídas (magnitud sqrt(x²+y²+z²))
+
+- flutter_tts: ^4.0.0
+  -> Síntesis de voz para anunciar cambios de actividad
+
+
+2. CONFIGURACIÓN ANDROID (AndroidManifest.xml)
+----------------------------------------------
+Permisos agregados:
+- com.google.android.gms.permission.ACTIVITY_RECOGNITION
+- android.permission.FOREGROUND_SERVICE_HEALTH
+
+Componentes de activity_recognition_flutter agregados dentro de <application>:
+- <receiver android:name="dk.cachet.activity_recognition_flutter.ActivityRecognizedBroadcastReceiver"/>
+- <service android:name="dk.cachet.activity_recognition_flutter.ActivityRecognizedService" .../>
+- <service android:name="dk.cachet.activity_recognition_flutter.ForegroundService" />
+
+
+3. CONFIGURACIÓN iOS (Info.plist)
+---------------------------------
+- NSMotionUsageDescription: "Esta app usa el sensor de movimiento para detectar
+  actividad física (caminar, correr) y caídas."
+
+
+4. NUEVOS ARCHIVOS DART
+------------------------
+
+4.1. lib/core/services/tts_service.dart
+    - Envuelve flutter_tts
+    - init(): detecta idioma del dispositivo, fallback a español, valida
+      disponibilidad del idioma
+    - speak(): detiene cualquier locución previa, reproduce el mensaje,
+      con try/catch para manejar errores silenciosamente
+    - Logs de depuración en cada paso
+
+4.2. lib/core/services/activity_service.dart
+    - Envuelve activity_recognition_flutter
+    - start(): inicia el stream con runForegroundService: true
+    - Debounce de 5 segundos: solo emite un cambio si el mismo tipo de
+      actividad se mantiene estable durante 5s consecutivos
+    - Solo anuncia si la actividad es DIFERENTE a la última anunciada
+    - Mapea ActivityType (WALKING, RUNNING, ON_FOOT, STILL, etc.) a
+      DetectedActivity (walking, running, stationary, unknown)
+    - ON_FOOT se mapea a walking (muchos dispositivos reportan ON_FOOT
+      en lugar de WALKING, lo que antes causaba "unknown")
+    - getMessageForActivity(): retorna "Estás caminando", "Estás corriendo",
+      "Te has detenido", "Estado desconocido"
+    - Logs de depuración en cada evento recibido y cada anuncio emitido
+
+4.3. lib/core/services/fall_detection_service.dart
+    - Envuelve sensors_plus (accelerometerEventStream)
+    - Calcula magnitud: sqrt(x² + y² + z²)
+    - Umbral de caída: > 25 m/s² (en reposo es ~9.8 m/s² por gravedad)
+    - Cooldown de 15s entre alertas para evitar falsos positivos
+    - Sampling period: SensorInterval.gameInterval (~20ms)
+
+4.4. lib/features/activity/presentation/widgets/activity_monitor_widget.dart
+    - Widget invisible que orquesta los 3 servicios
+    - initState(): solicita permisos, inicializa TTS, inicia servicios
+    - Reproduce "Iniciando monitoreo de actividad" como prueba de TTS
+    - Escucha activityStream -> llama _tts.speak() con el mensaje
+    - Escucha fallStream -> muestra FallDetectionDialog
+    - dispose(): cancela suscripciones y libera recursos
+
+4.5. lib/features/activity/presentation/widgets/fall_detection_dialog.dart
+    - Diálogo modal no dismissible (PopScope canPop: false)
+    - Muestra "¿Estás bien?" con contador regresivo de 15s
+    - Si pasan 15s sin respuesta, cambia a mensaje secundario:
+      "Por favor, responde. ¿Estás bien? Necesitamos confirmar..."
+    - Botón "Sí, estoy bien" que cierra el diálogo
+
+
+5. ARCHIVOS MODIFICADOS
+-----------------------
+
+5.1. lib/main.dart
+    - Import agregado: activity_monitor_widget.dart
+    - AuthWrapper.build(): cuando _isAuthenticated es true, retorna
+      ActivityMonitorWidget(child: HomePage()) en lugar de HomePage()
+      directamente
+    - Esto asegura que los servicios se inicien automáticamente al
+      autenticarse, sin necesidad de botones
+
+
+6. CAMBIOS EN COMPILACIÓN (build fixes)
+---------------------------------------
+
+6.1. android/settings.gradle
+    - Kotlin: 1.8.22 -> 2.2.0
+    - AGP: 8.1.0 -> 8.7.0
+
+6.2. android/app/build.gradle
+    - compileSdk: flutter.compileSdkVersion -> 36
+    - minSdk: flutter.minSdkVersion -> 26
+    - ndkVersion: flutter.ndkVersion -> "27.0.12077973"
+    - Java: VERSION_1_8 -> VERSION_17
+
+6.3. android/gradle/wrapper/gradle-wrapper.properties
+    - Gradle: 8.3 -> 8.9
+
+6.4. Pub cache (se pierden al hacer flutter pub cache repair)
+    - Parche en activity_recognition_flutter-5.0.0/android/build.gradle:
+      namespace "dk.cachet.activity_recognition_flutter"
+    - Parche en ActivityRecognitionFlutterPlugin.java: icon 0 en lugar de
+      R.drawable.common_full_open_on_phone (recurso eliminado de GMS)
+    - Parche en ForegroundService.java: icon 0 en lugar de
+      R.drawable.common_full_open_on_phone
+
+
+7. DECISIONES TÉCNICAS Y JUSTIFICACIONES
+-----------------------------------------
+
+7.1. Debounce de 3 segundos con antirrebote
+    - El stream de activity_recognition puede emitir cambios transitorios
+      (ej. STILL -> WALKING -> STILL en pocos segundos)
+    - El timer SOLO se reinicia cuando el tipo de actividad CAMBIA.
+      Si el stream sigue emitiendo el mismo tipo, el timer sigue corriendo.
+    - 3s es suficiente para filtrar fluctuaciones en emuladores sin sensores
+      reales, y responde más rápido a cambios reales del usuario.
+    - Antirrebote: se usa _pendingActivity como estado candidato. Solo se
+      confirma y anuncia cuando el timer expira sin haber cambiado el tipo.
+
+7.2. Umbral de caída > 35 m/s²
+    - Magnitud normal en reposo: ~9.8 m/s² (gravedad)
+    - Al caminar: ~10-15 m/s²
+    - Al correr: ~15-25 m/s²
+    - Una caída real: pico > 35 m/s² (impacto fuerte)
+    - 35.0 evita falsos positivos con movimientos bruscos al correr
+
+7.3. Cooldown de 15s en caídas
+    - Una caída puede generar múltiples picos en fracciones de segundo
+    - 15s evita múltiples diálogos por el mismo incidente
+
+7.4. runForegroundService: true
+    - Android 12+ requiere foreground service para Activity Recognition
+    - El foreground service muestra una notificación permanente
+    - Necesario para que el stream reciba eventos
+
+7.5. Idioma del TTS
+    - Intenta usar el idioma del dispositivo (locale)
+    - Si no es español ni inglés, usa español por defecto
+    - Verifica disponibilidad del idioma antes de asignarlo
+
+
+8. FIX: DETECCIÓN DE ACTIVIDAD — OSCILACIÓN (19-Jun-2026)
+---------------------------------------------------------
+
+8.1. Problema: El estado oscilaba (stationary↔walking) al menor movimiento
+    - El debounce anterior (ventana fija de 3s) solo miraba el ÚLTIMO tipo
+      dentro de la ventana. Si el sensor alternaba tipos, bastaba un evento
+      del otro tipo al final para cambiar el estado.
+    - Con la ventana fija, un patrón STILL→WALKING→STILL en 3s terminaba
+      anunciando "Te has detenido" aunque el usuario estuviera caminando.
+
+8.2. Solución: Confirmación por eventos consecutivos (activity_service.dart)
+    - Se eliminó el concepto de "ventana de tiempo" y _pendingActivity
+    - Nuevo sistema: se requiere N eventos CONSECUTIVOS del mismo tipo
+      (diferente al último anunciado) para confirmar un cambio
+    - Cualquier evento que coincida con _lastAnnounced RESETEA la
+      confirmación inmediatamente
+    - requiredConsecutive = 2: se necesitan 2 eventos seguidos del nuevo
+      tipo para cambiar de estado
+    - confirmTimeoutSeconds = 20: timeout de seguridad por si el sensor
+      deja de enviar datos
+
+8.3. Trazas de ejemplo:
+    Walking → ruido (oscilación):
+      STILL(60)  → NEW confirming=stationary count=1
+      WALKING(70)→ BACK to last → RESET (nunca llega a 2)
+      → Sin anuncio ✓
+
+    Walking → se detiene (estable):
+      STILL(80)  → NEW confirming=stationary count=1
+      STILL(75)  → CONFIRMED → "Te has detenido"
+      → 2 eventos consecutivos confirman ✓
+
+    Walking → RUNNING con ON_FOOT interrumpiendo:
+      RUNNING(75)→ NEW confirming=running count=1
+      ON_FOOT(80)→ mapped=walking==last → RESET
+      RUNNING(70)→ NEW confirming=running count=1
+      RUNNING(85)→ CONFIRMED → "Estás corriendo"
+      → Se confirma, aunque con retraso por la interrupción ✓
+
+8.4. Cambios en activity_service.dart:
+    - Eliminado: _pendingActivity, _debounceTimer, _finalizeWindow
+    - Nuevos: _confirmingType, _confirmingCount, _confirmTimer
+    - Nuevo: _resetConfirm() (centraliza la lógica de reseteo)
+    - requiredConsecutive = 2 (eventos consecutivos necesarios)
+    - confirmTimeoutSeconds = 20 (timeout de seguridad)
+    - Lógica de _onActivityEvent simplificada:
+      1. SKIP si confianza < minConfidence
+      2. RESET si mapped == _lastAnnounced (vuelta al estado actual)
+      3. INCREMENTAR count si mapped == _confirmingType
+         → Si count >= requiredConsecutive: CONFIRMAR
+      4. SINO: nuevo confirmingType, count=1, iniciar timer
+    - Se mantienen: minConfidence=40, filtro primera detección stationary,
+      logging exhaustivo, ON_FOOT→walking
+
+
+9. REWRITE: DATA SOURCE DEL ACELERÓMETRO (19-Jun-2026)
+-------------------------------------------------------
+
+9.1. Problema: Extremadamente sensible, pasos dobles/triples por pisada
+    - El código nativo (Kotlin) hacía step detection y clasificación de
+      actividad con umbrales mal sintonizados y sin anti-rebote
+    - magnitude > 12 disparaba un paso, permitiendo múltiples incrementos
+      por la vibración de una sola pisada
+    - La clasificación por promedio móvil de 10 muestras reaccionaba a
+      micro-movimientos, alternando "Quieto"↔"Caminando" constantemente
+
+9.2. Solución: Toda la lógica migrada a Dart DataSource con 3 reglas
+
+    9.2.1. Anti-Rebote de 300ms para PASOS (Debounce)
+        - Variable _lastStepTime: solo se suma un paso si han pasado
+          MÁS de 300ms desde el último paso
+        - Una pisada genera múltiples picos de magnitud; el primero supera
+          el umbral y suma el paso; los siguientes son ignorados por
+          los próximos 300ms
+        - Esto elimina por completo los pasos dobles/triples
+
+    9.2.2. Ventanas de Tiempo de 3s para ESTADOS (Time Windows)
+        - _lastWalkTime y _lastRunTime se actualizan CADA VEZ que
+          la magnitud supera 13.0 o 17.0 respectivamente
+        - El estado se determina NO por el último evento, sino por
+          cuándo fue la última vez que se superó cada umbral:
+          * Si hace < 3s desde _lastRunTime → CORRIENDO
+          * Si hace < 3s desde _lastWalkTime → CAMINANDO
+          * Si hace >= 3s desde ambos → QUIETO
+        - Esto crea un "cojín de 3 segundos": el usuario puede hacer
+          una pausa de 1-2 segundos y la app sigue reportando el
+          estado anterior, evitando falsos "Quieto"
+
+    9.2.3. Umbrales ajustados
+        - Paso / Caminata: magnitud > 13.0 m/s²
+        - Correr: magnitud > 17.0 m/s²
+        - Caída: magnitud > 35.0 m/s²
+
+9.3. Archivos modificados:
+
+    android/.../MainActivity.kt:
+        - Eliminado: moving average (magnitudeHistory), step detection
+          (stepCount, lastMagnitude), actividad (lastActivityType,
+          activityConfidence), throttling (sampleCount)
+        - Simplificado a: recibir cada muestra, calcular magnitud
+          bruta sqrt(x²+y²+z²), enviarla inmediatamente vía
+          events?.success(magnitude) como Double
+        - MethodChannel handlers ("start"/"stop"/"reset") ahora
+          son no-ops (el estado se maneja en Dart)
+
+    lib/features/auth/data/datasources/acelerometer_datasource.dart:
+        - Reescripto completamente: recibe magnitud cruda del canal,
+          aplica debounce de 300ms para pasos, ventanas de 3s para
+          estado, emite StepData con stepCount y activityType
+          computados localmente
+        - Nuevos: _lastStepTime, _lastWalkTime, _lastRunTime,
+          _processReading(), _resolveState()
+        - stepStream getter ahora retorna _controller.stream (broadcast)
+
+    lib/core/services/fall_detection_service.dart:
+        - Umbral de caída: 25.0 → 35.0 m/s² (regla 4 del usuario)
+
+9.4. Traza de ejemplo (pisada única con rebotes):
+    t=0ms  magnitud=14.2 → >13.0, diff _lastStepTime = ∞ > 300ms → PASO+1 ✓
+    t=100ms magnitud=12.8 → >13.0? NO → no hace nada
+    t=200ms magnitud=13.5 → >13.0, diff=200ms < 300ms → ignorado ✓
+    t=400ms magnitud=15.1 → >13.0, diff=400ms > 300ms → PASO+1 ✓
+    → 2 pisadas reales, 2 pasos (sin dobles ni triples)
+
+9.5. Traza de ejemplo (caminar → pausa 2s → caminar):
+    t=0  caminando, magnitud=14 → _lastWalkTime=t0, estado=walking
+    t=1s pausa, magnitud=9.8   → no supera 13.0, _lastWalkTime=t0
+    t=2s aún en pausa           → diff desde t0 = 2s < 3s → estado=walking ✓
+    t=3s aún en pausa           → diff desde t0 = 3s >= 3s → estado=stationary
+    t=4s reanuda, magnitud=14   → _lastWalkTime=t4, estado=walking
+    → La pausa de 2s no genera anuncio falso de "Quieto"
+
+
+10. FIX: TTS NO HABLA (19-Jun-2026)
+------------------------------------
+
+10.1. Problema: El sistema detecta cambios de actividad pero el TTS
+      no reproduce los mensajes de voz.
+
+10.2. Causas diagnosticadas:
+
+      a) init() usaba isLanguageAvailable() que es poco fiable en Android:
+         si devolvía false para es-ES Y en-US, igualmente seteaba es-ES
+         (no disponible) y marcaba _initialized = true, pero el motor
+         no podía sintetizar ese idioma.
+
+      b) No se verificaba el resultado de setLanguage(): si fallaba,
+         _initialized se marcaba igual como true, y speak() llamaba
+         al motor con un idioma que no funciona → silencio.
+
+      c) No había test de verificación post-init: el monitor widget
+         asumía que TTS funcionaba sin confirmarlo.
+
+10.3. Cambios en tts_service.dart:
+
+      - Eliminado: isLanguageAvailable() (no confiable en Android)
+      - Nuevo: lista de candidatos [es-ES, es-MX, en-US, en-GB]
+      - setLanguage() se prueba secuencialmente con cada candidato
+        hasta que uno funciona (try/catch por cada intento)
+      - Si ningún idioma funciona → _initialized = false, log claro
+      - Nuevo método test(): intenta sintetizar "ok" y retorna bool
+      - Nuevo getter isInitialized
+
+10.4. Cambios en activity_monitor_widget.dart:
+
+      - init() ahora llama _tts.test() después de _tts.init()
+      - Solo habla el mensaje de bienvenida si test() es OK
+      - El listener de activityStream verifica ttsOk antes de speak()
+      - El listener de fallStream también verifica ttsOk
+      - Logs con prefijo [Monitor] para facilitar depuración
